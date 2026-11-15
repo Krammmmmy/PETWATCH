@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./lib/supabase";
 
 type Page = "dashboard" | "schedule" | "consumption" | "history" | "alerts";
 type ScheduleType = "Food" | "Water" | "Food & water";
@@ -34,6 +35,7 @@ type HistoryRecord = {
   unit: "g" | "ml";
   status: "Successful" | "Failed";
   schedule: string;
+  method?: "Automatic" | "Manual";
 };
 
 const navItems: { id: Page; label: string; icon: IconName }[] = [
@@ -285,7 +287,8 @@ type IconName =
   | "x"
   | "info"
   | "history"
-  | "search";
+  | "search"
+  | "thermometer";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -320,6 +323,12 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
       <>
         <circle cx="11" cy="11" r="7" />
         <path d="m20 20-4-4" />
+      </>
+    ),
+    thermometer: (
+      <>
+        <path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0Z" />
+        <path d="M12 11v6" />
       </>
     ),
     bell: (
@@ -529,17 +538,19 @@ function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [now, setNow] = useState(new Date());
-  const [schedules, setSchedules] = useState(initialSchedules);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(true);
   const [alerts, setAlerts] = useState(initialAlerts);
-  const [amount, setAmount] = useState(85);
+  const [amount, setAmount] = useState("85");
   const [savedAmount, setSavedAmount] = useState(85);
+  const [historyEntries, setHistoryEntries] = useState(historyRecords);
   const [toast, setToast] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formName, setFormName] = useState("");
   const [formTime, setFormTime] = useState("08:00");
   const [formType, setFormType] = useState<ScheduleType>("Food & water");
-  const [formAmount, setFormAmount] = useState(85);
+  const [formAmount, setFormAmount] = useState("85");
   const [formRecurrence, setFormRecurrence] = useState<Recurrence>("Every Day");
   const [formDays, setFormDays] = useState<DayName[]>([
     "Mon",
@@ -558,7 +569,7 @@ function App() {
   const [alertFilter, setAlertFilter] = useState<"All" | "Unread" | "Supply" | "Device">("All");
   const [historyRange, setHistoryRange] = useState<
     "Today" | "Last 7 Days" | "Last 30 Days" | "Custom"
-  >("Last 7 Days");
+  >("Last 30 Days");
   const [historyType, setHistoryType] = useState<"All" | "Food" | "Water">("All");
   const [historyStatus, setHistoryStatus] = useState<"All" | "Successful" | "Failed">("All");
   const [historySearch, setHistorySearch] = useState("");
@@ -576,6 +587,41 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const loadSchedules = async () => {
+      setSchedulesLoading(true);
+
+      const { data, error } = await supabase
+        .from("pet_schedules")
+        .select("*")
+        .order("time", { ascending: true });
+
+      if (error) {
+        console.error("Error loading schedules:", error.message);
+        setToast("Unable to load schedules");
+        setSchedulesLoading(false);
+        return;
+      }
+
+      const formattedSchedules: Schedule[] = (data ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        time: item.time.slice(0, 5),
+        type: item.type as ScheduleType,
+        amount: Number(item.amount),
+        enabled: item.enabled,
+        recurrence: item.recurrence as Recurrence,
+        days: item.days as DayName[],
+        startDate: item.start_date,
+        endDate: item.end_date ?? "",
+      }));
+
+      setSchedules(formattedSchedules);
+      setSchedulesLoading(false);
+    };
+
+    loadSchedules();
+  }, []);
   const navigate = (next: Page) => {
     setPage(next);
     setMobileNav(false);
@@ -587,7 +633,7 @@ function App() {
     setFormName("");
     setFormTime("08:00");
     setFormType("Food & water");
-    setFormAmount(savedAmount);
+    setFormAmount(String(savedAmount));
     setFormRecurrence("Every Day");
     setFormDays(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
     setFormStartDate(dateInputValue(0));
@@ -601,7 +647,7 @@ function App() {
     setFormName(schedule.name);
     setFormTime(schedule.time);
     setFormType(schedule.type);
-    setFormAmount(schedule.amount || savedAmount);
+    setFormAmount(String(schedule.amount || savedAmount));
     setFormRecurrence(schedule.recurrence);
     setFormDays(schedule.days);
     setFormStartDate(schedule.startDate);
@@ -624,72 +670,138 @@ function App() {
     setFormError("");
   };
 
-  const saveSchedule = () => {
+  const saveSchedule = async () => {
+    const parsedFoodAmount = Number(formAmount);
+
     if (!formTime) {
       setFormError("Choose a feeding time.");
       return;
     }
+
     if (!formStartDate) {
       setFormError("Choose a start date.");
       return;
     }
+
     if (formEndDate && formEndDate < formStartDate) {
       setFormError("End date must be on or after the start date.");
       return;
     }
+
     if (formRecurrence !== "Once" && formDays.length === 0) {
       setFormError("Select at least one day for this recurring schedule.");
       return;
     }
-    if (formType !== "Water" && (formAmount < 20 || formAmount > 150)) {
+
+    if (
+      formType !== "Water" &&
+      (!formAmount ||
+        !Number.isFinite(parsedFoodAmount) ||
+        parsedFoodAmount < 20 ||
+        parsedFoodAmount > 150)
+    ) {
       setFormError("Food amount must be between 20 g and 150 g.");
       return;
     }
-    if (editingId) {
-      setSchedules((items) =>
-        items.map((item) =>
-          item.id === editingId
-            ? {
-                ...item,
-                name: formName.trim() || `${formType} routine`,
-                time: formTime,
-                type: formType,
-                amount: formType === "Water" ? 0 : formAmount,
-                recurrence: formRecurrence,
-                days: formRecurrence === "Once" ? [] : formDays,
-                startDate: formStartDate,
-                endDate: formEndDate,
-              }
-            : item,
-        ),
-      );
-      setToast("Schedule updated");
+
+    const scheduleData = {
+      name: formName.trim() || `${formType} routine`,
+      time: formTime,
+      type: formType,
+      amount: formType === "Water" ? 0 : parsedFoodAmount,
+      enabled: true,
+      recurrence: formRecurrence,
+      days: formRecurrence === "Once" ? [] : formDays,
+      start_date: formStartDate,
+      end_date: formEndDate || null,
+    };
+
+    let error;
+
+    if (editingId !== null) {
+      const result = await supabase
+        .from("pet_schedules")
+        .update(scheduleData)
+        .eq("id", editingId);
+
+      error = result.error;
     } else {
-      setSchedules((items) =>
-        [
-          ...items,
-          {
-            id: Date.now(),
-            name: formName.trim() || `${formType} routine`,
-            time: formTime,
-            type: formType,
-            amount: formType === "Water" ? 0 : formAmount,
-            enabled: true,
-            recurrence: formRecurrence,
-            days: formRecurrence === "Once" ? [] : formDays,
-            startDate: formStartDate,
-            endDate: formEndDate,
-          },
-        ].sort((a, b) => a.time.localeCompare(b.time)),
-      );
-      setToast("New schedule saved");
+      const result = await supabase
+        .from("pet_schedules")
+        .insert(scheduleData);
+
+      error = result.error;
     }
+
+    if (error) {
+      console.error("Error saving schedule:", error.message);
+      setFormError("Could not save schedule. Please try again.");
+      return;
+    }
+
+    // Reload schedules from Supabase after saving.
+    const { data, error: loadError } = await supabase
+      .from("pet_schedules")
+      .select("*")
+      .order("time", { ascending: true });
+
+    if (loadError) {
+      console.error("Error refreshing schedules:", loadError.message);
+      setToast("Saved, but could not refresh the schedule list");
+      setEditorOpen(false);
+      return;
+    }
+
+    setSchedules(
+      (data ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        time: item.time.slice(0, 5),
+        type: item.type as ScheduleType,
+        amount: Number(item.amount),
+        enabled: item.enabled,
+        recurrence: item.recurrence as Recurrence,
+        days: item.days as DayName[],
+        startDate: item.start_date,
+        endDate: item.end_date ?? "",
+      })),
+    );
+
     setEditorOpen(false);
+    setToast(editingId !== null ? "Schedule updated successfully" : "Schedule saved successfully");
   };
 
   const applyAmount = () => {
-    setSavedAmount(amount);
-    setToast(`Food amount set to ${amount} g`);
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 20 || parsedAmount > 150) {
+      const boundedAmount = Number.isFinite(parsedAmount) ? parsedAmount : 20;
+      setAmount(String(Math.min(150, Math.max(20, boundedAmount))));
+      setToast("Food amount must be between 20 g and 150 g");
+      return;
+    }
+    setSavedAmount(parsedAmount);
+    setToast(`Food amount set to ${parsedAmount} g`);
+  };
+
+  const dispenseManually = () => {
+    const timestamp = new Date();
+    setHistoryEntries((entries) => [
+      {
+        id: Date.now(),
+        date: dateInputValue(0),
+        time: `${String(timestamp.getHours()).padStart(2, "0")}:${String(
+          timestamp.getMinutes(),
+        ).padStart(2, "0")}`,
+        type: "Food",
+        amount: savedAmount,
+        unit: "g",
+        status: "Successful",
+        schedule: "Manual dispense",
+        method: "Manual",
+      },
+      ...entries,
+    ]);
+    setToast(`${savedAmount} g dispensed manually`);
   };
 
   const unreadCount = alerts.filter((alert) => alert.unread).length;
@@ -706,7 +818,7 @@ function App() {
   const filteredHistory = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    return historyRecords.filter((record) => {
+    return historyEntries.filter((record) => {
       const recordDate = parseLocalDate(record.date);
       const age = Math.floor((today.getTime() - recordDate.getTime()) / 86400000);
       const inRange =
@@ -722,12 +834,20 @@ function App() {
       const query = historySearch.trim().toLowerCase();
       const matchesSearch =
         !query ||
-        record.schedule.toLowerCase().includes(query) ||
-        record.type.toLowerCase().includes(query) ||
-        record.status.toLowerCase().includes(query);
+        [
+          record.date,
+          formatHistoryDate(record.date),
+          record.time,
+          record.type,
+          `${record.amount} ${record.unit}`,
+          record.status === "Failed" ? "Not dispensed" : "",
+          record.schedule,
+          record.status,
+          record.method ?? "Automatic",
+        ].some((field) => field.toLowerCase().includes(query));
       return inRange && matchesType && matchesStatus && matchesSearch;
     });
-  }, [historyRange, historyType, historyStatus, historySearch, customFrom, customTo]);
+  }, [historyEntries, historyRange, historyType, historyStatus, historySearch, customFrom, customTo]);
 
   const historySummary = useMemo(
     () => ({
@@ -766,6 +886,7 @@ function App() {
 
   return (
     <div className="app-shell">
+
       <aside className={`sidebar ${mobileNav ? "mobile-open" : ""}`}>
         <div className="brand">
           <BrandMark />
@@ -929,6 +1050,43 @@ function App() {
                 </div>
               </section>
 
+              <section className="card temperature-card">
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">Food storage</span>
+                    <h2>Temperature monitor</h2>
+                  </div>
+                  <span className="temperature-status">In range</span>
+                </div>
+                <div className="temperature-reading">
+                  <span className="metric-icon neutral">
+                    <Icon name="thermometer" />
+                  </span>
+                  <strong>
+                    32<small>°C</small>
+                  </strong>
+                </div>
+                <div className="temperature-track" aria-hidden="true">
+                  <span />
+                </div>
+                <p>Ideal food storage range: 26–38 °C</p>
+              </section>
+
+              <section className="card manual-dispense-card">
+                <span className="metric-icon food">
+                  <Icon name="bowl" />
+                </span>
+                <span className="eyebrow">Manual control</span>
+                <h2>Dispense food now</h2>
+                <p>
+                  Serve the current portion size of {savedAmount} g. This action will be saved in
+                  history.
+                </p>
+                <button className="primary-button full" onClick={dispenseManually}>
+                  <Icon name="plus" size={17} /> Dispense {savedAmount} g
+                </button>
+              </section>
+
               <section className="card daily-card">
                 <div className="section-heading">
                   <div>
@@ -1077,55 +1235,92 @@ function App() {
                   </span>
                 </div>
                 <div className="schedule-list">
-                  {schedules.map((schedule) => (
-                    <div
-                      className={`schedule-row ${!schedule.enabled ? "disabled" : ""}`}
-                      key={schedule.id}
-                    >
-                      <div className="schedule-clock">
-                        <Icon name="clock" />
-                        <strong>{formatTime(schedule.time)}</strong>
-                      </div>
-                      <div className="schedule-details">
-                        <strong>{schedule.name}</strong>
-                        <span>
-                          {schedule.type}
-                          {schedule.type !== "Water" ? ` · ${schedule.amount} g` : ""}
+                  {schedulesLoading ? (
+                    <p>Loading schedules...</p>
+                  ) : schedules.length === 0 ? (
+                    <p>No schedules saved yet. Click "Add schedule" to create one.</p>
+                  ) : (
+                    schedules.map((schedule) => (
+                      <div
+                        className={`schedule-row ${!schedule.enabled ? "disabled" : ""}`}
+                        key={schedule.id}
+                      >
+                        <div className="schedule-clock">
+                          <Icon name="clock" />
+                          <strong>{formatTime(schedule.time)}</strong>
+                        </div>
+                        <div className="schedule-details">
+                          <strong>{schedule.name}</strong>
+                          <span>
+                            {schedule.type}
+                            {schedule.type !== "Water" ? ` · ${schedule.amount} g` : ""}
+                          </span>
+                          <em>{formatRecurrence(schedule)}</em>
+                        </div>
+                        <span className="run-time">
+                          {schedule.enabled ? `Next · ${getNextRun(schedule)}` : "Paused"}
                         </span>
-                        <em>{formatRecurrence(schedule)}</em>
+                        <Toggle
+                          checked={schedule.enabled}
+                          onChange={async () => {
+                            const newEnabled = !schedule.enabled;
+
+                            const { error } = await supabase
+                              .from("pet_schedules")
+                              .update({ enabled: newEnabled })
+                              .eq("id", schedule.id);
+
+                            if (error) {
+                              console.error("Error updating schedule:", error.message);
+                              setToast("Unable to update schedule");
+                              return;
+                            }
+
+                            setSchedules((items) =>
+                              items.map((item) =>
+                                item.id === schedule.id
+                                  ? { ...item, enabled: newEnabled }
+                                  : item,
+                              ),
+                            );
+
+                            setToast(newEnabled ? "Schedule enabled" : "Schedule paused");
+                          }}
+                          label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name} schedule`}
+                        />
+                        <button
+                          className="row-action"
+                          onClick={() => openEditSchedule(schedule)}
+                          aria-label={`Edit ${schedule.name} schedule`}
+                        >
+                          <Icon name="edit" size={18} />
+                        </button>
+                        <button
+                          className="row-action delete"
+                          onClick={async () => {
+                            const { error } = await supabase
+                              .from("pet_schedules")
+                              .delete()
+                              .eq("id", schedule.id);
+
+                            if (error) {
+                              console.error("Error deleting schedule:", error.message);
+                              setToast("Unable to delete schedule");
+                              return;
+                            }
+
+                            setSchedules((items) =>
+                              items.filter((item) => item.id !== schedule.id),
+                            );
+
+                            setToast("Schedule deleted successfully");
+                          }}
+                          aria-label={`Delete ${schedule.name} schedule`}
+                        >
+                          <Icon name="trash" size={18} />
+                        </button>
                       </div>
-                      <span className="run-time">
-                        {schedule.enabled ? `Next · ${getNextRun(schedule)}` : "Paused"}
-                      </span>
-                      <Toggle
-                        checked={schedule.enabled}
-                        onChange={() =>
-                          setSchedules((items) =>
-                            items.map((item) =>
-                              item.id === schedule.id ? { ...item, enabled: !item.enabled } : item,
-                            ),
-                          )
-                        }
-                        label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name} schedule`}
-                      />
-                      <button
-                        className="row-action"
-                        onClick={() => openEditSchedule(schedule)}
-                        aria-label={`Edit ${schedule.name} schedule`}
-                      >
-                        <Icon name="edit" size={18} />
-                      </button>
-                      <button
-                        className="row-action delete"
-                        onClick={() => {
-                          setSchedules((items) => items.filter((item) => item.id !== schedule.id));
-                          setToast("Schedule deleted");
-                        }}
-                        aria-label={`Delete ${schedule.name} schedule`}
-                      >
-                        <Icon name="trash" size={18} />
-                      </button>
-                    </div>
+                    )
                   ))}
                 </div>
               </section>
@@ -1144,7 +1339,7 @@ function App() {
                 <label htmlFor="food-amount">Editable amount</label>
                 <div className="stepper">
                   <button
-                    onClick={() => setAmount(Math.max(20, amount - 5))}
+                    onClick={() => setAmount(String(Math.max(20, (Number(amount) || 20) - 5)))}
                     aria-label="Decrease by 5 grams"
                   >
                     −
@@ -1155,16 +1350,21 @@ function App() {
                       type="number"
                       min="20"
                       max="150"
-                      step="5"
+                      step="1"
                       value={amount}
-                      onChange={(event) =>
-                        setAmount(Math.min(150, Math.max(20, Number(event.target.value))))
-                      }
+                      onChange={(event) => setAmount(event.target.value)}
+                      onBlur={() => {
+                        if (!amount) return;
+                        const parsedAmount = Number(amount);
+                        if (Number.isFinite(parsedAmount)) {
+                          setAmount(String(Math.min(150, Math.max(20, parsedAmount))));
+                        }
+                      }}
                     />
                     <span>g</span>
                   </div>
                   <button
-                    onClick={() => setAmount(Math.min(150, amount + 5))}
+                    onClick={() => setAmount(String(Math.min(150, (Number(amount) || 20) + 5)))}
                     aria-label="Increase by 5 grams"
                   >
                     +
@@ -1176,8 +1376,8 @@ function App() {
                   min="20"
                   max="150"
                   step="5"
-                  value={amount}
-                  onChange={(event) => setAmount(Number(event.target.value))}
+                  value={Math.min(150, Math.max(20, Number(amount) || 20))}
+                  onChange={(event) => setAmount(event.target.value)}
                   aria-label="Food amount in grams"
                 />
                 <div className="range-labels">
@@ -1187,7 +1387,7 @@ function App() {
                 <button
                   className="primary-button full"
                   onClick={applyAmount}
-                  disabled={amount === savedAmount}
+                  disabled={Number(amount) === savedAmount}
                 >
                   Apply amount
                 </button>
@@ -1343,9 +1543,12 @@ function App() {
                 <div className="history-search">
                   <Icon name="search" size={17} />
                   <input
-                    type="search"
+                    type="text"
+                    role="searchbox"
+                    inputMode="search"
                     aria-label="Search dispensing history"
-                    placeholder="Search schedule or status"
+                    placeholder="Search date, amount, schedule or status"
+                    autoComplete="off"
                     value={historySearch}
                     onChange={(event) => setHistorySearch(event.target.value)}
                   />
@@ -1422,22 +1625,22 @@ function App() {
                     <option>Failed</option>
                   </select>
                 </label>
-                {(historyRange !== "Last 7 Days" ||
+                {(historyRange !== "Last 30 Days" ||
                   historyType !== "All" ||
                   historyStatus !== "All" ||
                   historySearch) && (
-                  <button
-                    className="clear-filters"
-                    onClick={() => {
-                      setHistoryRange("Last 7 Days");
-                      setHistoryType("All");
-                      setHistoryStatus("All");
-                      setHistorySearch("");
-                    }}
-                  >
-                    Clear filters
-                  </button>
-                )}
+                    <button
+                      className="clear-filters"
+                      onClick={() => {
+                        setHistoryRange("Last 30 Days");
+                        setHistoryType("All");
+                        setHistoryStatus("All");
+                        setHistorySearch("");
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
               </div>
 
               {filteredHistory.length ? (
@@ -1479,10 +1682,17 @@ function App() {
                             </span>
                           </td>
                           <td data-label="Status">
-                            <span className={`operation-status ${record.status.toLowerCase()}`}>
-                              <i />
-                              {record.status}
-                            </span>
+                            <div className="history-status-cell">
+                              <span className={`operation-status ${record.status.toLowerCase()}`}>
+                                <i />
+                                {record.status}
+                              </span>
+                              <span
+                                className={`dispense-method ${(record.method ?? "Automatic").toLowerCase()}`}
+                              >
+                                {record.method ?? "Automatic"}
+                              </span>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1510,7 +1720,7 @@ function App() {
                 </div>
               )}
               <div className="history-footer">
-                Showing {filteredHistory.length} of {historyRecords.length} sample records
+                Showing {filteredHistory.length} of {historyEntries.length} records
               </div>
             </section>
           </div>
@@ -1721,7 +1931,7 @@ function App() {
                     max="150"
                     value={formAmount}
                     onChange={(event) => {
-                      setFormAmount(Number(event.target.value));
+                      setFormAmount(event.target.value);
                       setFormError("");
                     }}
                   />
@@ -1909,10 +2119,10 @@ function getNextRun(schedule: Schedule) {
           : offset === 1
             ? "Tomorrow"
             : candidate.toLocaleDateString([], {
-                weekday: "short",
-                month: "short",
-                day: "numeric",
-              });
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+            });
       return `${dayLabel}, ${formatTime(schedule.time)}`;
     }
   }
